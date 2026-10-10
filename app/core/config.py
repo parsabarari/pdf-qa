@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # --- RAG parameters ---
     chunk_size: int = Field(default=1000, gt=0)  # characters
     chunk_overlap: int = Field(default=200, ge=0)  # characters
+    min_relevance_score: float = Field(default=0.25, ge=-1.0, le=1.0)
     top_k: int = Field(default=4, gt=0)
 
     # --- Misc ---

@@ -1,6 +1,8 @@
 import uuid
 
 from tests.conftest import make_pdf
+from app.services.qa import NOT_FOUND_ANSWER
+from app.services.vector_store import RetrievedChunk, VectorStore
 
 
 def upload(client, text, name="doc.pdf"):
@@ -90,3 +92,61 @@ def test_llm_failure_returns_502(client, mock_ai, monkeypatch):
     response = client.post(f"/documents/{doc_id}/ask", json={"question": "What are apples?"})
     assert response.status_code == 502
     assert "sk-secret" not in response.text
+
+
+def test_below_relevance_threshold_skips_llm(
+    client, mock_ai, settings, monkeypatch
+):
+    settings.min_relevance_score = 0.25
+    doc_id = upload(client, "Apples grow on trees.")
+
+    def fake_query(self, document_id, embedding, top_k):
+        return [
+            RetrievedChunk(
+                page=1,
+                chunk_index=0,
+                text="Apples grow on trees.",
+                score=0.24,
+            )
+        ]
+
+    monkeypatch.setattr(VectorStore, "query", fake_query)
+
+    response = client.post(
+        f"/documents/{doc_id}/ask",
+        json={"question": "Where do apples grow?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == NOT_FOUND_ANSWER
+    assert response.json()["sources"] == []
+    assert mock_ai == []
+
+
+def test_score_equal_to_threshold_is_accepted(
+    client, mock_ai, settings, monkeypatch
+):
+    settings.min_relevance_score = 0.25
+    doc_id = upload(client, "Apples grow on trees.")
+
+    def fake_query(self, document_id, embedding, top_k):
+        return [
+            RetrievedChunk(
+                page=1,
+                chunk_index=0,
+                text="Apples grow on trees.",
+                score=0.25,
+            )
+        ]
+
+    monkeypatch.setattr(VectorStore, "query", fake_query)
+
+    response = client.post(
+        f"/documents/{doc_id}/ask",
+        json={"question": "Where do apples grow?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Mock answer"
+    assert len(response.json()["sources"]) == 1
+    assert len(mock_ai) == 1

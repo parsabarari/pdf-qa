@@ -40,6 +40,7 @@ def settings(tmp_path) -> Settings:
         chunk_size=200,
         chunk_overlap=40,
         top_k=3,
+        min_relevance_score=-1.0,
     )
 
 

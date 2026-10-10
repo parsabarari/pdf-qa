@@ -125,11 +125,25 @@ def answer_question(
 ) -> tuple[str, list[RetrievedChunk]]:
     query_vector = embeddings.embed_query(question, settings)
     chunks = store.query(document_id, query_vector, settings.top_k)
-    logger.info("retrieval_done document_id=%s chunks=%d", document_id, len(chunks))
-    if not chunks:
+
+    relevant_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk.score >= settings.min_relevance_score
+    ]
+
+    logger.info(
+        "retrieval_done document_id=%s retrieved_chunks=%d relevant_chunks=%d min_score=%.3f",
+        document_id,
+        len(chunks),
+        len(relevant_chunks),
+        settings.min_relevance_score,
+    )
+
+    if not relevant_chunks:
         return NOT_FOUND_ANSWER, []
 
     logger.info("llm_request_started model=%s", settings.llm_model)
-    answer = call_llm(build_messages(question, chunks), settings)
+    answer = call_llm(build_messages(question, relevant_chunks), settings)
     logger.info("llm_request_completed answer_chars=%d", len(answer))
-    return answer, chunks
+    return answer, relevant_chunks
