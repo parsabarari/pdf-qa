@@ -1,0 +1,3 @@
+# Uploaded PDFs and the Chroma database are runtime data: never commit them.
+*
+!.gitignore
