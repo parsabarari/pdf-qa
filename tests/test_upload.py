@@ -48,7 +48,7 @@ def test_embedding_failure_returns_502(client, monkeypatch):
     from app.services import embeddings
     from app.services.embeddings import EmbeddingError
 
-    def boom(texts):
+    def boom(texts, settings):
         raise EmbeddingError("secret provider detail")
 
     monkeypatch.setattr(embeddings, "embed_texts", boom)

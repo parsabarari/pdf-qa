@@ -54,8 +54,8 @@ def client(settings):
 def mock_ai(monkeypatch):
     """Replace the embedding and LLM calls. Returns a list that records LLM prompts."""
     llm_calls: list[list[dict]] = []
-    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: [fake_vector(t) for t in texts])
-    monkeypatch.setattr(embeddings, "embed_query", lambda q: fake_vector(q))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, settings: [fake_vector(t) for t in texts])
+    monkeypatch.setattr(embeddings, "embed_query", lambda q, settings: fake_vector(q))
 
     def fake_llm(messages, settings):
         llm_calls.append(messages)
