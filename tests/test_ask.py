@@ -1,7 +1,7 @@
 import uuid
 
 from tests.conftest import make_pdf
-from app.services.qa import NOT_FOUND_ANSWER
+from app.services.qa import NOT_FOUND_ANSWER, answer_question
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 
@@ -150,3 +150,59 @@ def test_score_equal_to_threshold_is_accepted(
     assert response.json()["answer"] == "Mock answer"
     assert len(response.json()["sources"]) == 1
     assert len(mock_ai) == 1
+
+
+
+def test_only_relevant_chunks_are_sent_to_llm(settings, monkeypatch):
+    settings.min_relevance_score = 0.25
+
+    chunks = [
+        RetrievedChunk(
+            page=1,
+            chunk_index=0,
+            text="Relevant content",
+            score=0.80,
+        ),
+        RetrievedChunk(
+            page=2,
+            chunk_index=1,
+            text="Irrelevant content",
+            score=0.24,
+        ),
+    ]
+
+    monkeypatch.setattr(
+        VectorStore,
+        "query",
+        lambda self, document_id, embedding, top_k: chunks,
+    )
+
+    captured_messages = []
+
+    def fake_call_llm(messages, settings):
+        captured_messages.append(messages)
+        return "Mock answer"
+
+    monkeypatch.setattr("app.services.qa.call_llm", fake_call_llm)
+
+    
+    monkeypatch.setattr(
+        "app.services.qa.embeddings.embed_query",
+        lambda question, settings: [0.1, 0.2, 0.3],
+    )
+
+    answer, sources = answer_question(
+        VectorStore("unused"),
+        "test-document",
+        "What does the document say?",
+        settings,
+    )
+
+    assert answer == "Mock answer"
+    assert len(sources) == 1
+    assert sources[0].chunk_index == 0
+
+    assert len(captured_messages) == 1
+    message_content = str(captured_messages[0])
+    assert "Relevant content" in message_content
+    assert "Irrelevant content" not in message_content

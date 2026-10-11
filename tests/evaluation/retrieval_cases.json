@@ -1,0 +1,28 @@
+
+[
+  {
+    "case_id": "qa_001",
+    "question": "What does the time complexity of an algorithm estimate?",
+    "expected_pages": [27]
+  },
+  {
+    "case_id": "qa_002",
+    "question": "Which time complexity often indicates that an algorithm sorts its input?",
+    "expected_pages": [30]
+  },
+  {
+    "case_id": "qa_003",
+    "question": "Why can estimating time complexity help determine whether an algorithm is efficient enough before implementation?",
+    "expected_pages": [31]
+  },
+  {
+    "case_id": "qa_004",
+    "question": "How does the linear-time algorithm solve the maximum subarray sum problem?",
+    "expected_pages": [33]
+  },
+  {
+    "case_id": "qa_005",
+    "question": "Why does the two pointers method solve the subarray sum problem in linear time?",
+    "expected_pages": [87, 88]
+  }
+]
