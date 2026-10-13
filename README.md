@@ -1,188 +1,311 @@
-# PDF Q&A (RAG backend)
+# PDF Q&A API
 
-A small FastAPI backend: upload a PDF, then ask questions that are answered **only from that PDF**, with the retrieved chunks returned as sources. No LangChain, no agents. The whole pipeline is readable in a few files:
+A lightweight **Retrieval-Augmented Generation (RAG)** backend built with FastAPI. Upload a PDF, ask questions about its contents, and receive an answer with the retrieved text chunks used as sources.
 
-**parse → chunk → embed → store → retrieve → generate**
+The implementation keeps the RAG pipeline explicit and easy to follow, without LangChain or agent frameworks:
 
-> Key idea: a vector represents **one chunk**, never the whole PDF. A PDF with 40 chunks has 40 vectors.
+**Parse → Chunk → Embed → Store → Retrieve → Generate**
 
-## Architecture
+> **Core design principle:** each vector represents one text chunk, not an entire PDF. A document split into 40 chunks produces 40 vectors.
+
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Project structure](#project-structure)
+- [Requirements and configuration](#requirements-and-configuration)
+- [Run locally](#run-locally)
+- [API usage](#api-usage)
+- [Testing](#testing)
+- [Docker](#docker)
+- [Railway deployment](#railway-deployment)
+- [Security considerations](#security-considerations)
+- [Limitations](#limitations)
+- [Possible multimodal extension](#possible-multimodal-extension)
+- [Design decisions](#design-decisions)
+
+## Features
+
+- Upload and validate PDF files through a REST API.
+- Extract text page by page and preserve page metadata.
+- Split text into overlapping chunks without crossing page boundaries.
+- Generate embeddings in batches and store vectors, text, and metadata in ChromaDB.
+- Retrieve relevant chunks for a question, scoped to the requested document.
+- Return the generated answer together with retrieved source chunks and retrieval scores.
+- Configure the LLM, embedding provider, chunking, and storage through environment variables.
+- Run unit tests without external API calls; optionally run integration tests against a real provider.
+- Run locally or in Docker.
+
+## How it works
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion [POST /documents/upload]
-        A[PDF upload] --> B[Validate + save]
-        B --> C[pdf_parser: text per page + clean]
-        C --> D[chunker: overlapping chunks + page metadata]
-        D --> E[embeddings: 1 vector per chunk]
-        E --> F[(ChromaDB<br/>vector + text + metadata)]
+    subgraph Ingestion["POST /documents/upload"]
+        A["PDF upload"] --> B["Validate and save"]
+        B --> C["Extract and clean text per page"]
+        C --> D["Create overlapping chunks with page metadata"]
+        D --> E["Generate one embedding per chunk"]
+        E --> F[("ChromaDB: vectors, text, metadata")]
     end
-    subgraph Query [POST /documents/ID/ask]
-        Q[Question] --> QE[Embed question<br/>same model]
-        QE --> S[Similarity search<br/>where document_id = ID]
+
+    subgraph QuestionAnswering["POST /documents/{id}/ask"]
+        Q["Question"] --> QE["Embed question with the same model"]
+        QE --> S["Similarity search filtered by document_id"]
         F --> S
-        S --> P[Prompt: system rules + context + question]
-        P --> L[LLM]
-        L --> R[Answer + sources]
+        S --> P["Build prompt from instructions, context, and question"]
+        P --> L["LLM"]
+        L --> R["Answer and retrieved sources"]
     end
 ```
 
-## Request flow
+### Ingestion flow
 
-**Upload**: check extension, size and `%PDF-` header → save as `data/uploads/<uuid>.pdf` → extract text per page (blank pages skipped, page numbers kept) → chunk each page → embed all chunks in batches → store in Chroma with metadata `{document_id, filename, page, chunk_index, num_pages, created_at}`.
+1. Validate the file extension, size, and PDF signature.
+2. Save the uploaded file under `data/uploads/<uuid>.pdf`.
+3. Extract and clean text page by page. Blank pages are skipped, while page numbers are preserved.
+4. Split each page into overlapping chunks. Chunks do not cross page boundaries.
+5. Generate embeddings in batches.
+6. Store each chunk, its vector, and metadata in ChromaDB.
 
-**Ask**: check the document exists → embed the question with the same embedding model → query Chroma with `where={"document_id": id}` → build the prompt → call the LLM → return the answer plus the retrieved chunks.
+Chunk metadata includes `document_id`, `filename`, `page`, `chunk_index`, `num_pages`, and `created_at`.
+
+### Question-answering flow
+
+1. Check that the requested document exists.
+2. Embed the question using the configured embedding model.
+3. Search ChromaDB with a `document_id` filter so results come from that document only.
+4. Build a prompt from the system instructions, retrieved context, and question.
+5. Call the language model and return its answer with the retrieved chunks.
+
+### Chunk size and overlap
+
+Chunk size controls how much text each vector represents and how much context can be supplied to the model per retrieved result. Overlap repeats some text at adjacent chunk boundaries, reducing the chance that a sentence split between chunks becomes difficult to retrieve.
+
+The chunker prefers paragraph, line, sentence, and then word boundaries. It keeps each chunk within a single page so every chunk has one page number.
+
+> **Changing `EMBEDDING_MODEL` after ingestion:** existing vectors may no longer be compatible with question embeddings. Re-ingest the documents or point `CHROMA_PATH` to a fresh database.
 
 ## Project structure
 
-```
+```text
 app/
-  main.py                 FastAPI app, logging, /health
-  api/deps.py             vector-store dependency
-  api/routes/documents.py POST /documents/upload, GET /documents/{id}
-  api/routes/qa.py        POST /documents/{id}/ask
-  core/config.py          settings from env vars
-  schemas/                Pydantic request/response models
+  main.py                 FastAPI app, logging, and /health
+  api/
+    deps.py               Vector-store dependency
+    routes/
+      documents.py        Upload and document metadata endpoints
+      qa.py               Question-answering endpoint
+  core/
+    config.py             Environment-based settings
+  schemas/                Pydantic request and response models
   services/
-    pdf_parser.py         PyMuPDF, page-by-page text + cleaning
-    chunker.py            deterministic overlapping chunker
-    embeddings.py         batched embedding calls
-    vector_store.py       ChromaDB wrapper (filter by document_id)
-    qa.py                 prompt building, retrieval, LLM call
-tests/                    unit tests (mocked AI) + optional integration test
-data/                     runtime data (git-ignored): uploads/, chroma/
+    pdf_parser.py         Page-by-page PDF text extraction and cleaning
+    chunker.py            Deterministic overlapping chunking
+    embeddings.py         Batched embedding requests
+    vector_store.py       ChromaDB wrapper and document filtering
+    qa.py                 Prompt construction, retrieval, and LLM call
+tests/                    Unit tests and optional integration tests
+data/                     Runtime uploads and ChromaDB files (git-ignored)
 ```
 
-## Environment variables
+## Requirements and configuration
+
+You need Python, an API key for your selected LLM/embedding provider, and the dependencies listed in `requirements-dev.txt`. The defaults target OpenAI-compatible APIs.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENAI_API_KEY` | – (required) | LLM key (and embeddings key unless overridden) |
-| `OPENAI_BASE_URL` | OpenAI | Any OpenAI-compatible endpoint |
-| `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` | fall back to above | Use a different provider for embeddings |
+| `OPENAI_API_KEY` | Required | LLM API key; also used for embeddings unless overridden |
+| `OPENAI_BASE_URL` | Provider default | Base URL for an OpenAI-compatible API |
+| `EMBEDDING_API_KEY` | Falls back to `OPENAI_API_KEY` | Optional separate embedding API key |
+| `EMBEDDING_BASE_URL` | Falls back to `OPENAI_BASE_URL` | Optional separate embedding endpoint |
 | `LLM_MODEL` | `gpt-4o-mini` | Chat model |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
-| `CHROMA_PATH` | `data/chroma` | Vector DB directory |
-| `UPLOAD_DIR` | `data/uploads` | Saved PDFs |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | Characters. Overlap must be < size |
-| `TOP_K` | `4` | Chunks retrieved per question |
-| `MAX_UPLOAD_MB` | `20` | Upload size limit |
-| `EMBEDDING_BATCH_SIZE` | `64` | Texts per embedding request |
-| `LOG_LEVEL` | `INFO` | Logging level |
+| `CHROMA_PATH` | `data/chroma` | ChromaDB persistence directory |
+| `UPLOAD_DIR` | `data/uploads` | Directory for uploaded PDFs |
+| `CHUNK_SIZE` | `1000` | Chunk size in characters |
+| `CHUNK_OVERLAP` | `200` | Overlap in characters; must be smaller than chunk size |
+| `TOP_K` | `4` | Number of chunks retrieved per question |
+| `MAX_UPLOAD_MB` | `20` | Maximum upload size in MB |
+| `EMBEDDING_BATCH_SIZE` | `64` | Number of texts per embedding request |
+| `LOG_LEVEL` | `INFO` | Application logging level |
 
-### Why chunk size and overlap exist
-Embedding a whole page gives one blurry vector that matches everything a little; tiny pieces lose context. **Chunk size** sets how much text one vector covers (and how much context the LLM sees per hit). **Overlap** repeats the end of one chunk at the start of the next so a sentence cut at a boundary is still fully present in at least one chunk. The chunker cuts at paragraph, line, sentence, then word boundaries, and never crosses pages, so every chunk has exactly one page number.
+See [`.env.example`](.env.example) for the available environment variables.
 
-> **Changing `EMBEDDING_MODEL` after uploading documents?** Old vectors become incompatible with new question vectors. Re-upload documents (or use a fresh `CHROMA_PATH`).
+## Run locally
 
-## Local setup
+Create and activate a virtual environment, install the development requirements, and configure your API key:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+# .venv\\Scripts\\Activate.ps1
+
 pip install -r requirements-dev.txt
-cp .env.example .env                 # then put your key in OPENAI_API_KEY
+cp .env.example .env
+```
+
+Add your provider key to `.env`, then start the server:
+
+```bash
 uvicorn app.main:app --reload
 ```
 
-Swagger UI: http://localhost:8000/docs
+- Interactive API documentation: http://localhost:8000/docs
+- Health check: http://localhost:8000/health
 
-## API examples
+## API usage
+
+### 1. Check the service
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"ok"}
-
-curl -X POST http://localhost:8000/documents/upload -F "file=@report.pdf"
-# 201
-# {"document_id":"6f1c...","filename":"report.pdf","num_pages":12,"num_chunks":38,"status":"processed"}
-
-curl http://localhost:8000/documents/6f1c...
-# {"document_id":"6f1c...","filename":"report.pdf","num_pages":12,"num_chunks":38,"created_at":"2026-..."}
-
-curl -X POST http://localhost:8000/documents/6f1c.../ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the main conclusions?"}'
-# {"document_id":"6f1c...","question":"What are the main conclusions?",
-#  "answer":"The report concludes ... (page 11)",
-#  "sources":[{"page":11,"chunk_index":35,"text":"...","score":0.82}, ...]}
 ```
 
-| Status | When |
-|---|---|
-| 400 | empty file, corrupt/encrypted PDF |
-| 404 | document not found |
-| 413 | file larger than `MAX_UPLOAD_MB` |
-| 415 | not a PDF (extension or content) |
-| 422 | invalid `document_id`, blank/too long question, or PDF with no extractable text |
-| 502 | embedding or LLM provider failed (details are logged, never returned) |
-| 500 | vector store failure |
+Example response:
 
-`score` is cosine similarity between the question and the chunk. It is a retrieval signal, not a confidence or correctness score.
+```json
+{"status":"ok"}
+```
 
-## Tests
+### 2. Upload a PDF
 
 ```bash
-pytest                                         # unit tests, no network, no API key
-RUN_INTEGRATION=1 OPENAI_API_KEY=sk-... pytest -m integration   # optional, real API calls
+curl -X POST http://localhost:8000/documents/upload \
+  -F "file=@report.pdf"
 ```
 
-Unit tests build real PDFs with PyMuPDF and mock the embedding and LLM calls. They use a real temporary ChromaDB, so the `document_id` filtering is genuinely tested.
+Example response (illustrative):
+
+```json
+{
+  "document_id": "6f1c...",
+  "filename": "report.pdf",
+  "num_pages": 12,
+  "num_chunks": 38,
+  "status": "processed"
+}
+```
+
+Keep the returned `document_id`; use it for document lookup and questions.
+
+### 3. Get document metadata
+
+```bash
+curl http://localhost:8000/documents/6f1c...
+```
+
+### 4. Ask a question
+
+```bash
+curl -X POST http://localhost:8000/documents/6f1c.../ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What are the main conclusions?"}'
+```
+
+The response contains the document ID, question, generated answer, and retrieved sources. Each source includes fields such as page, chunk index, text, and score. Exact response values depend on the uploaded PDF and model output.
+
+**Interpreting `score`:** it is a similarity-based retrieval signal, not a calibrated confidence score and not proof that an answer is correct.
+
+### HTTP status codes
+
+| Status | Meaning |
+|---|---|
+| `201` | PDF accepted and processed |
+| `400` | Empty, corrupt, or encrypted PDF |
+| `404` | Document not found |
+| `413` | Upload exceeds `MAX_UPLOAD_MB` |
+| `415` | File is not accepted as a PDF |
+| `422` | Invalid document ID, invalid question, or PDF with no extractable text |
+| `502` | Embedding or LLM provider error |
+| `500` | Vector-store failure |
+
+Provider error details are logged rather than returned directly to the client.
+
+## Testing
+
+Run the unit suite:
+
+```bash
+pytest
+```
+
+Unit tests do not require network access or a real API key. They create PDFs with PyMuPDF, mock embedding and LLM calls, and use a temporary ChromaDB instance to exercise document-level filtering.
+
+To run the optional integration tests with real API calls:
+
+```bash
+RUN_INTEGRATION=1 OPENAI_API_KEY=your-api-key pytest -m integration
+```
 
 ## Docker
 
+Build and run the container:
+
 ```bash
 docker build -t pdf-qa .
-docker run --rm -p 8000:8000 --env-file .env -v pdfqa-data:/app/data pdf-qa
-# Railway-style: docker run --rm -e PORT=9000 -p 9000:9000 --env-file .env pdf-qa
+docker run --rm -p 8000:8000 --env-file .env \
+  -v pdfqa-data:/app/data pdf-qa
 ```
 
-The container runs `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`.
+To use a custom port:
+
+```bash
+docker run --rm -e PORT=9000 -p 9000:9000 \
+  --env-file .env -v pdfqa-data:/app/data pdf-qa
+```
+
+The container starts Uvicorn on `0.0.0.0` and uses `PORT` when provided, defaulting to `8000`.
 
 ## Railway deployment
 
-1. Push this project to GitHub (the Dockerfile is detected automatically).
-2. New Project → Deploy from GitHub repo.
-3. **Variables**: set `OPENAI_API_KEY` (plus any optional ones). Do not set `PORT`; Railway provides it.
-4. **Volume**: add a volume mounted at `/app/data`. Without it, uploads and vectors vanish on every redeploy.
-5. Settings → Networking → Generate Domain, then open `/docs`.
-6. Optional: set the health check path to `/health`.
+1. Push the repository to GitHub and create a Railway project from the repository. Railway can detect the included Dockerfile.
+2. Set `OPENAI_API_KEY` and any required optional variables in the service variables.
+3. Add a persistent volume mounted at `/app/data`; otherwise, uploaded PDFs and local vector data will not persist across redeployments.
+4. Generate a public domain in the service networking settings.
+5. Open `/docs` to explore the API. You can optionally configure `/health` as the health-check path.
 
-Run a **single replica**: Chroma's local files are not designed for several processes writing at once.
+Use **a single replica** with the current local ChromaDB setup. Its local-file persistence is not designed for multiple service instances writing concurrently.
 
-## Prompt-injection stance
+## Security considerations
 
-The system prompt tells the model to answer only from the context and to treat it as untrusted data. Each chunk is wrapped in `<chunk>` tags with `<` and `>` escaped, so PDF text cannot close the context block. This reduces the risk but does not eliminate it, and no prompt can guarantee it.
+The system prompt instructs the model to answer from retrieved context and treat that context as untrusted data. Retrieved chunks are wrapped in `<chunk>` tags, with angle brackets escaped to make it harder for PDF text to break out of the context block.
 
-## Known limitations
+This is a mitigation, **not a guarantee** against prompt injection. The API also currently has no authentication or authorization: a person who obtains a document ID may be able to query that document. Do not expose sensitive documents publicly without adding appropriate access controls.
 
-- Text PDFs only. Scanned PDFs return 422 (no OCR). Images, charts and tables are not understood; tables extract as flat text.
-- No authentication: anyone with a `document_id` (a random UUID) can query it. No document list or delete endpoint.
-- Upload processing is synchronous; very large PDFs make the request slow.
-- Chunk sizes are in characters, not tokens.
-- Vector search only (no keyword/hybrid search or re-ranking). Questions that need the whole document ("summarise everything") work poorly with top-K retrieval.
-- Local disk storage: single instance, needs a volume on Railway.
-- Source pages come from the retrieved chunks; the LLM's own page mentions are not verified.
-- "Sources" is retrieval attribution, not a formal citation system.
+## Limitations
 
-## Future multimodal extensions
+- **Text-based PDFs only:** scanned PDFs are not OCR-processed and return `422` when no text can be extracted. Images, charts, and visual layout are not interpreted; tables may be extracted as plain text.
+- **No authentication or authorization:** document IDs are random UUIDs, but they are not a substitute for access control. There are no list or delete endpoints.
+- **Synchronous ingestion:** large PDFs can make upload requests slow.
+- **Character-based chunking:** chunk size is measured in characters, not tokens.
+- **Vector search only:** there is no keyword/hybrid search or re-ranking. Questions requiring comprehensive coverage of an entire document may perform poorly when only the top-K chunks are retrieved.
+- **Local persistence:** the current storage setup suits a single instance and requires a persistent volume in deployment.
+- **Source attribution is limited:** source pages are inherited from retrieved chunks; page references generated in the answer are not independently verified. Returned sources show retrieved context, not formal citations.
+- **Retrieval and answer quality are not guaranteed:** relevant text may not be retrieved, and the model may still produce an unsupported answer.
 
-The data model already separates a **retrievable item** (a vector plus metadata) from the **source content**. To add images and tables, keep that and add more *representations* per document section:
+## Possible multimodal extension
 
-| Section part | Representation stored | Embedding |
+The current implementation is text-only. A future extension could represent text, images, charts, and tables as separate retrievable items that point back to the same document section.
+
+| Content | Possible stored representation | Possible embedding |
 |---|---|---|
-| Text | the text | text embedding |
-| Image / chart | a caption from a vision model, or the image itself | text embedding of the caption, or an image/multimodal embedding (e.g. CLIP) |
-| Table | Markdown/CSV text plus a short LLM summary | text embedding of the summary (and/or the table text) |
+| Text | Extracted text | Text embedding |
+| Image or chart | Vision-generated caption, or the image itself | Caption embedding or image/multimodal embedding |
+| Table | Markdown/CSV text and optionally a short summary | Embedding of the table text or summary |
 
-Each item would carry metadata like `{document_id, page, section_id, modality, source_ref}`. At query time you search across modalities (still filtered by `document_id`), group hits by `section_id`, and pass text plus images to a multimodal LLM.
+Each item could carry metadata such as `document_id`, `page`, `section_id`, `modality`, and `source_ref`. Retrieval could search across modalities, combine hits belonging to the same section, and pass supported text/image inputs to a multimodal model.
 
-"Multi-vector" does **not** mean one vector containing everything. It means one section can have **several vectors**, one per representation, all pointing back to the same section. Retrieval combines them, for example by merging hits that share a `section_id`. The code change is mostly an extra extraction step in `pdf_parser.py` (`extract_images`, `extract_tables`) that yields more items, plus a `modality` metadata field in `vector_store.py`.
+In this design, **multi-vector** means several vectors for different representations of one section—not one vector containing the entire document. These are possible future directions, not capabilities of the current code.
 
-## Key design decisions
+## Design decisions
 
-- **One Chroma collection, filter by metadata** rather than one collection per PDF: simpler, and `where={"document_id": ...}` is applied inside `VectorStore.query`, so routes cannot forget it.
-- **Embeddings are passed explicitly** to Chroma, so Chroma's default model never runs and document and question vectors always come from the same configured model.
-- **Cosine distance**, converted to a similarity score for the response.
-- **Sync route handlers**: FastAPI runs them in a threadpool, which suits blocking SDK and Chroma calls and keeps the code simple.
-- **Services raise their own exceptions** (`EmbeddingError`, `LLMError`, `VectorStoreError`); routes translate them to HTTP codes with client-safe messages.
+- **One ChromaDB collection with metadata filtering:** simpler than creating a collection per PDF. The `document_id` filter is applied inside `VectorStore.query`, reducing the risk that a route forgets to scope retrieval.
+- **Explicit embeddings:** vectors are generated by the configured embedding model and passed to ChromaDB, avoiding accidental use of ChromaDB's default embedding function.
+- **Consistent embedding model:** documents and questions must use compatible embedding models. Changing the model requires re-ingestion or a fresh vector database.
+- **Cosine similarity:** cosine distance is converted to a similarity score for the API response; this score should not be interpreted as answer confidence.
+- **Synchronous route handlers:** blocking SDK and ChromaDB operations are kept straightforward; FastAPI runs standard synchronous handlers in a thread pool.
+- **Service-level errors:** services raise specific exceptions such as `EmbeddingError`, `LLMError`, and `VectorStoreError`; routes translate them into HTTP status codes and client-safe messages.
